@@ -87,11 +87,40 @@ supervisorctl status
 └── .rootpass         root 密码（600，root 可读）
 ```
 
+## 防冻结保活（内置）
+
+免费面板会冻结"不活跃"的容器，镜像内置 `keepalive` 服务（supervisor 托管，两种启动模式都会跑，重启自动拉起）：
+
+| 活跃信号 | 实现 | 默认占用 |
+|---|---|---|
+| CPU | 每轮短促计算突发（纯 bash 忙询，无 fork） | ~500ms/60s，平均 **<1%** |
+| 网络 | HTTPS 心跳（`cdn-cgi/trace` / `generate_204`，端点轮换） | KB 级/分钟 |
+| 终端 | 周期性向容器控制台输出一行 + touch 心跳文件 | 每 5 分钟一行 |
+
+```bash
+supervisorctl tail keepalive     # 看保活日志
+supervisorctl status             # keepalive 应为 RUNNING
+```
+
+**调节**（面板环境变量，或改完 `supervisorctl restart keepalive`）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `SANDBOX_KEEPALIVE` | `1` | `0` 关闭保活 |
+| `KEEPALIVE_INTERVAL` | `60` | 循环间隔（秒），被冻结就调小 |
+| `KEEPALIVE_CPU_MS` | `500` | 每轮 CPU 突发毫秒数，调大 = 平均 CPU 更高 |
+| `KEEPALIVE_NET` | `1` | 网络心跳开关 |
+| `KEEPALIVE_CONSOLE` | `1` | 控制台心跳开关 |
+| `KEEPALIVE_EVERY` | `5` | 每 N 轮打印一行控制台输出 |
+
+心跳文件：`/home/container/sandbox/.keepalive`（mtime 即最近一轮心跳时间）。
+
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `SANDBOX_SSHD` | `auto` | 内置 sshd 开关：`always` / `never` / `auto`（auto=守护模式开、脚本模式关，避免和面板自带 sshd 抢端口） |
+| `SANDBOX_KEEPALIVE` | `1` | 保活脚本开关（见上节） |
 | `SERVER_PORT` | `22` | sshd 监听端口（面板自动注入） |
 | `TZ` | `Asia/Shanghai` | 时区 |
 

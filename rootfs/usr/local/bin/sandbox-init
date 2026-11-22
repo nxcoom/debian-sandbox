@@ -113,7 +113,7 @@ if [ "$SSHD_MODE" != "never" ]; then
   SSH_PORT="${SERVER_PORT:-22}"
   cat > "$SSHD_CONF" <<EOF
 [program:sshd]
-command=/bin/sh -c 'mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e -o Port=${SSH_PORT} -o PasswordAuthentication=yes -o PermitRootLogin=yes'
+command=/bin/sh -c 'mkdir -p /run/sshd && exec /usr/sbin/sshd -D -e -o Port=${SSH_PORT} -o PasswordAuthentication=yes -o PermitRootLogin=yes -o ClientAliveInterval=60 -o ClientAliveCountMax=3'
 autostart=true
 autorestart=true
 startretries=10
@@ -121,6 +121,26 @@ redirect_stderr=true
 stdout_logfile=/var/log/supervisor/sshd.log
 EOF
   log "内置 sshd 将监听端口 $SSH_PORT（SANDBOX_SSHD=$SSHD_MODE）"
+fi
+
+# ---------- 内置保活（防面板冻结空闲容器） ----------
+KEEPALIVE_CONF="/etc/supervisor/conf.d/zz-sandbox-keepalive.conf"
+if [ "${SANDBOX_KEEPALIVE:-1}" = "1" ]; then
+  cat > "$KEEPALIVE_CONF" <<EOF
+[program:keepalive]
+command=/bin/bash /usr/local/bin/sandbox-keepalive
+autostart=true
+autorestart=true
+startretries=10
+redirect_stderr=true
+stdout_logfile=/dev/fd/1
+stdout_logfile_maxbytes=0
+environment=KEEPALIVE_INTERVAL="${KEEPALIVE_INTERVAL:-60}",KEEPALIVE_CPU_MS="${KEEPALIVE_CPU_MS:-500}",KEEPALIVE_NET="${KEEPALIVE_NET:-1}",KEEPALIVE_CONSOLE="${KEEPALIVE_CONSOLE:-1}",KEEPALIVE_EVERY="${KEEPALIVE_EVERY:-5}"
+EOF
+  log "保活已启用（SANDBOX_KEEPALIVE=1）：CPU 突发 + 网络心跳 + 控制台心跳"
+else
+  rm -f "$KEEPALIVE_CONF"
+  log "保活已禁用（SANDBOX_KEEPALIVE=0）"
 fi
 
 # ---------- 启动服务管理器 ----------
@@ -144,6 +164,7 @@ banner() {
   echo " 加服务:    $SERVICES_DIR/*.conf"
   echo "            改后执行: supervisorctl reread && supervisorctl update"
   echo " 日志:      /var/log/supervisor/  和  $LOG_DIR/"
+  echo " 保活:      keepalive 服务运行中（SANDBOX_KEEPALIVE=0 可关闭）"
   echo " root SSH:  端口 ${SERVER_PORT:-22}，密码在 $ROOTPASS_FILE"
   echo " 持久目录:  $CONTAINER_DIR（容器其余路径重启会还原）"
   echo " 工具:      curl wget ip ss dig nmap tcpdump socat nc iperf3 mtr"
