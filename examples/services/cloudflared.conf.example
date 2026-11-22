@@ -1,0 +1,8 @@
+; 复制到 /home/container/sandbox/services/cloudflared.conf 后执行:
+;   supervisorctl reread && supervisorctl update
+[program:cloudflared]
+command=/usr/local/bin/cloudflared tunnel run --config /home/container/sandbox/cloudflared/config.yml
+autostart=true
+autorestart=true
+redirect_stderr=true
+stdout_logfile=/home/container/sandbox/logs/cloudflared.log

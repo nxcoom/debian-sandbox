@@ -1,0 +1,9 @@
+#!/bin/bash
+# prestart 钩子示例：每次容器启动前执行。
+# 用法：改名为 .sh 复制到 /home/container/sandbox/prestart.d/
+#
+# 注意：容器内除 /home/container 外的路径重启会还原，
+# 所以这里装的软件每次启动都会重新装一遍（略耗时）；
+# 常用工具建议直接加到仓库 Dockerfile 里重新构建镜像。
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends figlet
