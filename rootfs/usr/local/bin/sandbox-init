@@ -191,7 +191,7 @@ trap shutdown TERM INT HUP
 banner() {
   echo
   echo "============================================================"
-  echo " Debian Sandbox v3 就绪（uid=$(id -u)，根只读，持久卷 /home/container）"
+  echo " Debian Sandbox 就绪（uid=$(id -u)，根只读，持久卷 /home/container）"
   echo "------------------------------------------------------------"
   echo " 容器层工具: ping dig nmap tcpdump socat nc iperf3 mtr git"
   echo "             python3 pip jq rsync ssh cloudflared aria2 ..."
