@@ -53,8 +53,8 @@ RUN set -eux; \
     echo 'container:x:988:' >> /etc/group; \
     echo 'container:x:988:988::/home/container:/bin/bash' >> /etc/passwd; \
     chmod 0755 /usr/local/bin/sandbox-init /usr/local/bin/sandbox-proot /usr/local/bin/sandbox-keepalive; \
-    chown 988:988 /home/container; \
-    mkdir -p /home/container /run/sshd /var/log/supervisor /etc/supervisor/conf.d
+    mkdir -p /home/container /run/sshd /var/log/supervisor /etc/supervisor/conf.d; \
+    chown 988:988 /home/container
 
 WORKDIR /home/container
 
