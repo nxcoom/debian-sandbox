@@ -136,12 +136,18 @@ EOF
     log "保活已禁用（SANDBOX_KEEPALIVE=0）"
   fi
 
-  # ---- 控制台 = 容器层 shell ----
+  # ---- 控制台 = 容器层 shell（exit 后 5 秒自动重开） ----
   CONSOLE_PID=""
   if [ "${SANDBOX_CONSOLE_SHELL:-1}" = "1" ]; then
-    ( export PS1='[sandbox]# '; exec bash -i ) &
+    console_loop() {
+      while :; do
+        bash --rcfile /etc/sandbox/console.bashrc -i
+        sleep 5
+      done
+    }
+    console_loop &
     CONSOLE_PID=$!
-    log "面板控制台已接管为容器层 shell（可直接敲命令）"
+    log "面板控制台已接管为容器层 shell（exit 后 5 秒自动重开）"
   fi
 fi
 
