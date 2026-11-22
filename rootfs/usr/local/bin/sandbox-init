@@ -101,6 +101,7 @@ stdout_logfile=/home/container/sandbox/logs/dropbear.log
 EOF
       SSH_MODE_DESC="dropbear(容器层,公钥): ssh container@<host> -p $SSH_PORT"
       log "SSH=dropbear 容器层直连（公钥登录，工具全可用）"
+      warn "已启用 dropbear：平台 altare-sshd 不会启动 → 面板密码登录将失效！登录方式: ssh container@<host> -p $SSH_PORT"
       ;;
     altare)
       if [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then
@@ -136,22 +137,39 @@ EOF
     log "保活已禁用（SANDBOX_KEEPALIVE=0）"
   fi
 
-  # ---- 控制台 = 容器层命令行（REPL：exit 只结束当前命令，永不刷屏） ----
+  # ---- 容器层提示符（dropbear 登录 shell 也用它，和 proot 世界的 root@UUID 区分） ----
+  if [ ! -f "$CONTAINER_DIR/.bashrc" ]; then
+    printf "%s\n" "export PS1='\[\e[36m\][sandbox]\[\e[0m\] \w \$ '" > "$CONTAINER_DIR/.bashrc"
+    printf "%s\n" "case \$- in *i*) . \$HOME/.bashrc;; esac" > "$CONTAINER_DIR/.profile"
+  fi
+
+  # ---- 控制台 = 容器层命令行（exit 被拦截；意外死亡后 5 秒自动重开并清空残留输入） ----
   CONSOLE_PID=""
   if [ "${SANDBOX_CONSOLE_SHELL:-1}" = "1" ]; then
     console_repl() {
       cd /home/container 2>/dev/null
-      echo "[console] 容器层命令行就绪：直接输入命令执行；exit 只结束命令本身，不会退出容器"
       while :; do
         printf '\033[0;36m[sandbox]\033[0m %s $ ' "$(pwd)"
-        IFS= read -r line || break
+        IFS= read -r line || return 0
         [ -z "$line" ] && continue
+        if printf '%s' "$line" | grep -Eq '^[[:space:]]*(exit|quit|logout|bye)[[:space:]]*$'; then
+          echo "[console] 这里是面板控制台（容器层命令行），exit 不会退出任何东西"
+          continue
+        fi
         eval "$line"
       done
     }
-    console_repl &
+    console_repl_loop() {
+      while :; do
+        console_repl
+        n=0
+        while [ "$n" -lt 50 ] && read -t 0.1 -r _; do n=$((n+1)); done
+        sleep 5
+      done
+    }
+    console_repl_loop &
     CONSOLE_PID=$!
-    log "面板控制台已接管为容器层命令行（直接敲命令即可）"
+    log "面板控制台已接管为容器层命令行（exit 被拦截；直接敲命令即可）"
   fi
 fi
 
