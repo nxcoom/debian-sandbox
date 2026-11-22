@@ -1,21 +1,19 @@
 #!/bin/bash
 # ============================================================
-# sandbox-init v2 — 面板沙箱容器的 init 入口（运行在 tini 之下）
+# sandbox-init v3 — 面板沙箱容器的 init 入口（运行在 tini 之下）
 #
 # 平台约束（实测 tryaltare）:
 #   * 容器根文件系统只读，唯一可写卷 = /home/container
 #   * 容器强制以 uid 988(container) 运行，无 root
-#   * => supervisor/sshd/keepalive 的所有状态必须放在 /home/container/sandbox/
-#   * => SSH 由平台自带 .sandbox/altare-sshd 提供（凭据由面板管理）
+#   * => supervisor/SSH/keepalive 的所有状态放在 /home/container/sandbox/
 #
-# 兼容 Pterodactyl / Pelican (Wings) 面板:
-#   * 读取 $STARTUP 并做 {{VAR}} -> ${VAR} 替换，作为主进程前台运行
-#   * STARTUP 为空 / 为 "sandbox-init" 时进入守护模式
+# SSH 三种姿势:
+#   * dropbear（容器层，公钥登录）: ~/.ssh/authorized_keys 存在时自动启用
+#       ssh container@<host> -p $SERVER_PORT
+#   * altare-sshd（平台自带，proot 环境，面板凭据）: 无公钥时的回退
+#   * 控制台 = 容器层 shell（守护模式下面板控制台可直接敲命令）
 #
-# 用户扩展（都在可写卷 /home/container 下，重启不丢）:
-#   /home/container/sandbox/services/*.conf    supervisord 服务配置
-#   /home/container/sandbox/prestart.d/*.sh    每次启动前执行的钩子
-#   supervisorctl status|start|stop|restart|tail
+# 兼容面板: 读取 $STARTUP（{{VAR}} 替换）；空 / "sandbox-init" → 守护模式
 # ============================================================
 set -u
 
@@ -68,17 +66,60 @@ for d in "$PRESTART_IMAGE" "$PRESTART_USER"; do
   done
 done
 
-# ---------- 平台 SSH（脚本模式由平台 start.sh 自己拉起，这里只在守护模式拉起） ----------
-if [ "$STARTUP_MODE" = "daemon" ] && [ "${SANDBOX_ALTARE_SSHD:-1}" != "0" ] \
-   && [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then
-  log "启动平台 SSH（.sandbox/altare-sshd，凭据同面板）"
-  ( cd "$CONTAINER_DIR" && nohup ./.sandbox/altare-sshd >/dev/null 2>&1 & )
-fi
+SSH_PORT="${SERVER_PORT:-22}"
+SSH_MODE_DESC="none"
 
-# ---------- 内置保活（防面板冻结空闲容器） ----------
-KEEPALIVE_CONF="$SUPD_DIR/zz-keepalive.conf"
-if [ "${SANDBOX_KEEPALIVE:-1}" = "1" ]; then
-  cat > "$KEEPALIVE_CONF" <<EOF
+# ---------- SSH / 控制台 shell（仅守护模式；脚本模式由启动命令自己掌控） ----------
+if [ "$STARTUP_MODE" = "daemon" ]; then
+
+  # ---- SSH 通道选择: auto|dropbear|altare|none ----
+  SSH_MODE="${SANDBOX_SSH:-auto}"
+  if [ "$SSH_MODE" = "auto" ]; then
+    if [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then SSH_MODE="dropbear"
+    elif [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then SSH_MODE="altare"
+    else SSH_MODE="none"; fi
+  fi
+
+  rm -f "$SUPD_DIR/zz-ssh.conf"
+  case "$SSH_MODE" in
+    dropbear)
+      HK_DIR="$SANDBOX_DIR/hostkeys"; mkdir -p "$HK_DIR"
+      HK="$HK_DIR/dropbear_ed25519_host_key"
+      DBKEY="$(command -v dropbearkey || echo /usr/sbin/dropbearkey)"
+      [ -f "$HK" ] || "$DBKEY" -t ed25519 -f "$HK" >/dev/null 2>&1
+      chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
+      chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
+      cat > "$SUPD_DIR/zz-ssh.conf" <<EOF
+[program:sshd]
+command=/usr/sbin/dropbear -F -E -s -p 0.0.0.0:${SSH_PORT} -r $HK
+directory=/home/container
+autostart=true
+autorestart=true
+startretries=10
+redirect_stderr=true
+stdout_logfile=/home/container/sandbox/logs/dropbear.log
+EOF
+      SSH_MODE_DESC="dropbear(容器层,公钥): ssh container@<host> -p $SSH_PORT"
+      log "SSH=dropbear 容器层直连（公钥登录，工具全可用）"
+      ;;
+    altare)
+      if [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then
+        log "SSH=平台 altare-sshd（proot 环境，凭据同面板）"
+        ( cd "$CONTAINER_DIR" && nohup ./.sandbox/altare-sshd >/dev/null 2>&1 & )
+        SSH_MODE_DESC="altare-sshd(proot,面板凭据)"
+      else
+        warn "未找到 .sandbox/altare-sshd"
+      fi
+      ;;
+    none)
+      log "SSH 已禁用（SANDBOX_SSH=none）"
+      ;;
+  esac
+
+  # ---- 内置保活 ----
+  KEEPALIVE_CONF="$SUPD_DIR/zz-keepalive.conf"
+  if [ "${SANDBOX_KEEPALIVE:-1}" = "1" ]; then
+    cat > "$KEEPALIVE_CONF" <<EOF
 [program:keepalive]
 command=/bin/bash /usr/local/bin/sandbox-keepalive
 autostart=true
@@ -89,19 +130,28 @@ stdout_logfile=/dev/fd/1
 stdout_logfile_maxbytes=0
 environment=KEEPALIVE_INTERVAL="${KEEPALIVE_INTERVAL:-60}",KEEPALIVE_CPU_MS="${KEEPALIVE_CPU_MS:-500}",KEEPALIVE_NET="${KEEPALIVE_NET:-1}",KEEPALIVE_CONSOLE="${KEEPALIVE_CONSOLE:-1}",KEEPALIVE_EVERY="${KEEPALIVE_EVERY:-5}"
 EOF
-  log "保活已启用（CPU 突发 + 网络心跳 + 控制台心跳）"
-else
-  rm -f "$KEEPALIVE_CONF"
-  log "保活已禁用（SANDBOX_KEEPALIVE=0）"
+    log "保活已启用（CPU 突发 + 网络心跳 + 控制台心跳）"
+  else
+    rm -f "$KEEPALIVE_CONF"
+    log "保活已禁用（SANDBOX_KEEPALIVE=0）"
+  fi
+
+  # ---- 控制台 = 容器层 shell ----
+  CONSOLE_PID=""
+  if [ "${SANDBOX_CONSOLE_SHELL:-1}" = "1" ]; then
+    ( export PS1='[sandbox]# '; exec bash -i ) &
+    CONSOLE_PID=$!
+    log "面板控制台已接管为容器层 shell（可直接敲命令）"
+  fi
 fi
 
-# ---------- 启动服务管理器（以当前用户运行，状态全在可写卷） ----------
+# ---------- 启动服务管理器（当前用户运行，状态全在可写卷） ----------
 SUP_PID=""
 supervisord -c /etc/supervisor/supervisord.conf &
 SUP_PID=$!
 sleep 0.5
 
-# supervisor 看门狗：挂了自动重启
+# supervisor 看门狗
 WATCH_PID=""
 sup_watch() {
   while :; do
@@ -120,6 +170,7 @@ MAIN_PID=""
 shutdown() {
   warn "收到停止信号，正在关闭"
   [ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null
+  [ -n "$CONSOLE_PID" ] && kill "$CONSOLE_PID" 2>/dev/null
   [ -n "$MAIN_PID" ] && kill "$MAIN_PID" 2>/dev/null
   supervisorctl shutdown >/dev/null 2>&1
   [ -n "$SUP_PID" ] && kill "$SUP_PID" 2>/dev/null
@@ -130,16 +181,16 @@ trap shutdown TERM INT HUP
 banner() {
   echo
   echo "============================================================"
-  echo " Debian Sandbox 就绪（uid=$(id -u)，根文件系统只读，持久卷 /home/container）"
+  echo " Debian Sandbox v3 就绪（uid=$(id -u)，根只读，持久卷 /home/container）"
   echo "------------------------------------------------------------"
-  echo " 服务管理:  supervisorctl status"
-  echo " 加服务:    $SERVICES_DIR/*.conf（SSH 里可用 /proc/1/root 前缀编辑）"
-  echo "            改完在面板重启容器生效"
-  echo " 日志:      $LOG_DIR/"
-  echo " 保活:      keepalive 运行中（SANDBOX_KEEPALIVE=0 可关闭）"
-  echo " SSH:       平台 altare-sshd，端口 ${SERVER_PORT:-22}，凭据同面板"
-  echo " 工具:      curl wget ip ss dig nmap tcpdump socat nc iperf3 mtr"
-  echo "            git python3 pip jq rsync ssh cloudflared aria2 iptables ..."
+  echo " 容器层工具: ping dig nmap tcpdump socat nc iperf3 mtr git"
+  echo "             python3 pip jq rsync ssh cloudflared aria2 ..."
+  echo " 服务管理:   supervisorctl status（SSH/控制台里直接可用）"
+  echo " 加服务:     $SERVICES_DIR/*.conf → 面板重启容器生效"
+  echo " SSH:        $SSH_MODE_DESC"
+  echo " 旧proot世界: 命令 sandbox-proot（tunxx 等在 rootfs 里）"
+  echo " 保活:       keepalive 运行中（SANDBOX_KEEPALIVE=0 关闭）"
+  echo " 日志:       $LOG_DIR/"
   echo "============================================================"
   echo
 }
@@ -154,7 +205,7 @@ if [ "$STARTUP_MODE" = "script" ]; then
   log "启动命令退出（code=$RC），正在关闭服务..."
 else
   banner
-  log "守护模式：常驻运行（supervisorctl 管理服务）"
+  log "守护模式：常驻运行"
   wait "$WATCH_PID"
   RC=0
 fi

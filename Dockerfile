@@ -27,7 +27,7 @@ RUN set -eux; \
       curl wget aria2 \
       iproute2 net-tools iputils-ping traceroute mtr-tiny bind9-dnsutils \
       netcat-openbsd socat tcpdump nmap iperf3 lsof ethtool whois iftop \
-      openssh-client openssh-server rsync \
+      openssh-client openssh-server rsync dropbear-bin \
       proxychains4 iptables wireguard-tools \
       tini supervisor cron sudo strace procps htop \
       git python3 python3-pip jq \
@@ -50,7 +50,10 @@ RUN set -eux; \
 # ---------- init 脚本与配置 ----------
 COPY rootfs/ /
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/sandbox-init; \
+    echo 'container:x:988:' >> /etc/group; \
+    echo 'container:x:988:988::/home/container:/bin/bash' >> /etc/passwd; \
+    chmod 0755 /usr/local/bin/sandbox-init /usr/local/bin/sandbox-proot /usr/local/bin/sandbox-keepalive; \
+    chown 988:988 /home/container; \
     mkdir -p /home/container /run/sshd /var/log/supervisor /etc/supervisor/conf.d
 
 WORKDIR /home/container

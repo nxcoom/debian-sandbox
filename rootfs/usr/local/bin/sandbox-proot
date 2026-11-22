@@ -1,0 +1,17 @@
+#!/bin/bash
+# sandbox-proot — 从容器层进入平台 proot 环境（等价于 altare-sshd 登录后的世界）
+# 用途: 访问 rootfs 里平台装的东西（tunxx 等）。退出即回到容器层。
+set -u
+export HOME="${HOME:-/home/container}"
+ROOTFS="$HOME/rootfs"
+PROOT="$HOME/.sandbox/proot"
+
+[ -x "$PROOT" ] || { echo "未找到 $PROOT（平台 proot 工具不存在）" >&2; exit 1; }
+[ -d "$ROOTFS" ] || { echo "未找到 $ROOTFS（平台 rootfs 不存在）" >&2; exit 1; }
+
+exec "$PROOT" -0 -r "$ROOTFS" -b /dev -b /proc -b /sys -w /root \
+  /usr/bin/env -i HOME=/root USER=root LOGNAME=root \
+  TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  SERVER_PORT="${SERVER_PORT:-}" SERVER_IP="${SERVER_IP:-}" \
+  /bin/bash -l
