@@ -136,18 +136,22 @@ EOF
     log "保活已禁用（SANDBOX_KEEPALIVE=0）"
   fi
 
-  # ---- 控制台 = 容器层 shell（exit 后 5 秒自动重开） ----
+  # ---- 控制台 = 容器层命令行（REPL：exit 只结束当前命令，永不刷屏） ----
   CONSOLE_PID=""
   if [ "${SANDBOX_CONSOLE_SHELL:-1}" = "1" ]; then
-    console_loop() {
+    console_repl() {
+      cd /home/container 2>/dev/null
+      echo "[console] 容器层命令行就绪：直接输入命令执行；exit 只结束命令本身，不会退出容器"
       while :; do
-        bash --rcfile /etc/sandbox/console.bashrc -i
-        sleep 5
+        printf '\033[0;36m[sandbox]\033[0m %s $ ' "$(pwd)"
+        IFS= read -r line || break
+        [ -z "$line" ] && continue
+        eval "$line"
       done
     }
-    console_loop &
+    console_repl &
     CONSOLE_PID=$!
-    log "面板控制台已接管为容器层 shell（exit 后 5 秒自动重开）"
+    log "面板控制台已接管为容器层命令行（直接敲命令即可）"
   fi
 fi
 
