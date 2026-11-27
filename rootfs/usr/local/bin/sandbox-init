@@ -112,7 +112,7 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
     chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
     cat > "$SUPD_DIR/zz-dropbear.conf" <<EOF
 [program:dropbear]
-command=/usr/sbin/dropbear -F -E -s -p 0.0.0.0:${DB_PORT} -r $HK_RSA -r $HK_ED
+command=/bin/sh -c 'export LD_PRELOAD=/etc/sandbox/fakepw.so; exec /usr/sbin/dropbear -F -E -s -p 0.0.0.0:${DB_PORT} -r $HK_RSA -r $HK_ED'
 directory=/home/container
 autostart=true
 autorestart=true

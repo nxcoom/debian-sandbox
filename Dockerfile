@@ -49,6 +49,16 @@ RUN set -eux; \
 
 # ---------- init 脚本与配置 ----------
 COPY rootfs/ /
+# 编译 fakepw.so：让非 root dropbear 用任意用户名/uid 都能通过公钥登录
+# （平台容器 uid 随节点变化 988/999/...，只读根无法运行时改 /etc/passwd）
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends gcc libc6-dev; \
+    gcc -shared -fPIC -O2 -o /etc/sandbox/fakepw.so /etc/sandbox/fakepw.c; \
+    rm -f /etc/sandbox/fakepw.c; \
+    apt-get purge -y gcc libc6-dev >/dev/null 2>&1 || true; \
+    apt-get autoremove -y >/dev/null 2>&1 || true; \
+    rm -rf /var/lib/apt/lists/*
 RUN set -eux; \
     echo 'container:x:988:' >> /etc/group; \
     echo 'container:x:988:988::/home/container:/bin/bash' >> /etc/passwd; \
