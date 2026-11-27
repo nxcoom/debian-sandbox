@@ -49,13 +49,17 @@ RUN set -eux; \
 
 # ---------- init 脚本与配置 ----------
 COPY rootfs/ /
-# 编译 fakepw.so：让非 root dropbear 用任意用户名/uid 都能通过公钥登录
-# （平台容器 uid 随节点变化 988/999/...，只读根无法运行时改 /etc/passwd）
+# 编译两个兼容库（编完删除 gcc 保持镜像瘦）：
+#   fakepw.so      : 让非 root sshd 用任意用户名/uid 都能通过公钥登录
+#                    （平台容器 uid 随节点变化 988/999/...，只读根无法改 /etc/passwd）
+#   chroot-noop.so : 适配丢弃 capability 的平台，sshd preauth 阶段 chroot/setgroups
+#                    失败时降级为成功（否则 sshd 在监听但任何公钥都登录不了 → EOF）
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends gcc libc6-dev; \
-    gcc -shared -fPIC -O2 -o /etc/sandbox/fakepw.so /etc/sandbox/fakepw.c; \
-    rm -f /etc/sandbox/fakepw.c; \
+    gcc -shared -fPIC -O2 -o /etc/sandbox/fakepw.so /etc/sandbox/fakepw.c -ldl; \
+    gcc -shared -fPIC -O2 -o /etc/sandbox/chroot-noop.so /etc/sandbox/chroot-noop.c -ldl; \
+    rm -f /etc/sandbox/fakepw.c /etc/sandbox/chroot-noop.c; \
     apt-get purge -y gcc libc6-dev >/dev/null 2>&1 || true; \
     apt-get autoremove -y >/dev/null 2>&1 || true; \
     rm -rf /var/lib/apt/lists/*

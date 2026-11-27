@@ -22,9 +22,9 @@ jobs:
       matrix:
         include:
           - base: bookworm-slim
-            tags: latest bookworm v14
+            tags: latest bookworm v15
           - base: trixie-slim
-            tags: trixie v14-trixie
+            tags: trixie v15-trixie
     steps:
       - name: Checkout
         uses: actions/checkout@v5

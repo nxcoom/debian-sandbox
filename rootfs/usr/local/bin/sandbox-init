@@ -138,7 +138,7 @@ Subsystem sftp internal-sftp
 EOF
     cat > "$SUPD_DIR/zz-dropbear.conf" <<EOF
 [program:dropbear]
-command=/bin/sh -c 'export LD_PRELOAD=/etc/sandbox/fakepw.so; exec /usr/sbin/sshd -D -e -f ${SSHD_CONF}'
+command=/bin/sh -c 'export LD_PRELOAD="/etc/sandbox/fakepw.so /etc/sandbox/chroot-noop.so"; exec /usr/sbin/sshd -D -e -f ${SSHD_CONF}'
 directory=/home/container
 autostart=true
 autorestart=true
