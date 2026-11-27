@@ -111,6 +111,9 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
     chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
     chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
     SSHD_CONF="$SANDBOX_DIR/sshd_config"
+    # 非 root sshd 需要在可写目录放 privilege separation / pid；/run 在只读根下
+    # 用镜像层预建的 /run/sshd，pid/日志都在持久卷。
+    mkdir -p /run/sshd 2>/dev/null || true
     cat > "$SSHD_CONF" <<EOF
 Port ${DB_PORT}
 ListenAddress 0.0.0.0
@@ -124,7 +127,10 @@ PermitRootLogin no
 AllowUsers container
 StrictModes no
 PrintMotd no
+SyslogFacility AUTH
+LogLevel VERBOSE
 PidFile ${SANDBOX_DIR}/sshd.pid
+Subsystem sftp internal-sftp
 EOF
     cat > "$SUPD_DIR/zz-dropbear.conf" <<EOF
 [program:dropbear]
@@ -134,7 +140,7 @@ autostart=true
 autorestart=true
 startretries=10
 redirect_stderr=true
-stdout_logfile=/home/container/sandbox/logs/dropbear.log
+stdout_logfile=/home/container/sandbox/logs/sshd.log
 EOF
     SSH_MODE_DESC="${SSH_MODE_DESC} + 第二端口 ${DB_PORT}=openssh(容器层/公钥)"
     log "SSH 第二端口 ${DB_PORT}: OpenSSH 容器层直连（公钥: ~/.ssh/authorized_keys）"
