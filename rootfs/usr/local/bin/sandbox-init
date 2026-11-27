@@ -1,19 +1,18 @@
 #!/bin/bash
 # ============================================================
-# sandbox-init v3 — 面板沙箱容器的 init 入口（运行在 tini 之下）
+# sandbox-init v8 — 面板沙箱容器的 init 入口（运行在 tini 之下）
 #
 # 平台约束（实测 tryaltare）:
 #   * 容器根文件系统只读，唯一可写卷 = /home/container
-#   * 容器强制以 uid 988(container) 运行，无 root
-#   * => supervisor/SSH/keepalive 的所有状态放在 /home/container/sandbox/
+#   * 容器以非 root 运行；PID1 的 stdin = 面板控制台 tty (/dev/pts/0)
+#   * 后台子 shell 的 stdin 会被 bash 接到 /dev/null（v4-v7 刷屏根因）
+#   * => 控制台交互必须由前台进程直接 read stdin，绝不放进后台 &
 #
-# SSH 三种姿势:
-#   * dropbear（容器层，公钥登录）: ~/.ssh/authorized_keys 存在时自动启用
-#       ssh container@<host> -p $SERVER_PORT
-#   * altare-sshd（平台自带，proot 环境，面板凭据）: 无公钥时的回退
-#   * 控制台 = 容器层 shell（守护模式下面板控制台可直接敲命令）
-#
-# 兼容面板: 读取 $STARTUP（{{VAR}} 替换）；空 / "sandbox-init" → 守护模式
+# v8 修复:
+#   - 移除后台 console_repl_loop，改为前台 REPL（直接读主进程 stdin）
+#   - read 返回 EOF 时长睡眠（300s），关闭面板再开不会再刷屏
+#   - 命令执行用 bash -c（子 shell），exit 等内置命令不会杀死 REPL
+#   - supervisord/keepalive/ssh 保持在后台由 supervisor 托管
 # ============================================================
 set -u
 
@@ -69,10 +68,8 @@ done
 SSH_PORT="${SERVER_PORT:-22}"
 SSH_MODE_DESC="none"
 
-# ---------- SSH / 控制台 shell（仅守护模式；脚本模式由启动命令自己掌控） ----------
+# ---------- SSH（仅守护模式；由 supervisord 托管） ----------
 if [ "$STARTUP_MODE" = "daemon" ]; then
-
-  # ---- SSH 通道选择: auto|dropbear|altare|none ----
   SSH_MODE="${SANDBOX_SSH:-auto}"
   if [ "$SSH_MODE" = "auto" ]; then
     if [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then SSH_MODE="dropbear"
@@ -100,8 +97,8 @@ redirect_stderr=true
 stdout_logfile=/home/container/sandbox/logs/dropbear.log
 EOF
       SSH_MODE_DESC="dropbear(容器层,公钥): ssh container@<host> -p $SSH_PORT"
-      log "SSH=dropbear 容器层直连（公钥登录，工具全可用）"
-      warn "已启用 dropbear：平台 altare-sshd 不会启动 → 面板密码登录将失效！登录方式: ssh container@<host> -p $SSH_PORT"
+      log "SSH=dropbear 容器层直连"
+      warn "dropbear 启用 → 面板密码登录失效；登录: ssh container@<host> -p $SSH_PORT"
       ;;
     altare)
       if [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then
@@ -127,8 +124,7 @@ autostart=true
 autorestart=true
 startretries=10
 redirect_stderr=true
-stdout_logfile=/dev/fd/1
-stdout_logfile_maxbytes=0
+stdout_logfile=/home/container/sandbox/logs/keepalive.log
 environment=KEEPALIVE_INTERVAL="${KEEPALIVE_INTERVAL:-60}",KEEPALIVE_CPU_MS="${KEEPALIVE_CPU_MS:-500}",KEEPALIVE_NET="${KEEPALIVE_NET:-1}",KEEPALIVE_CONSOLE="${KEEPALIVE_CONSOLE:-1}",KEEPALIVE_EVERY="${KEEPALIVE_EVERY:-5}"
 EOF
     log "保活已启用（CPU 突发 + 网络心跳 + 控制台心跳）"
@@ -137,54 +133,25 @@ EOF
     log "保活已禁用（SANDBOX_KEEPALIVE=0）"
   fi
 
-  # ---- 容器层提示符（dropbear 登录 shell 也用它，和 proot 世界的 root@UUID 区分） ----
+  # ---- 容器层提示符（dropbear 登录 shell 用） ----
   if [ ! -f "$CONTAINER_DIR/.bashrc" ]; then
     printf "%s\n" "export PS1='\[\e[36m\][sandbox]\[\e[0m\] \w \$ '" > "$CONTAINER_DIR/.bashrc"
     printf "%s\n" "case \$- in *i*) . \$HOME/.bashrc;; esac" > "$CONTAINER_DIR/.profile"
   fi
-
-  # ---- 控制台 = 容器层命令行（exit 被拦截；意外死亡后 5 秒自动重开并清空残留输入） ----
-  CONSOLE_PID=""
-  if [ "${SANDBOX_CONSOLE_SHELL:-1}" = "1" ]; then
-    console_repl() {
-      cd /home/container 2>/dev/null
-      while :; do
-        printf '\033[0;36m[sandbox]\033[0m %s $ ' "$(pwd)"
-        IFS= read -r line || return 0
-        [ -z "$line" ] && continue
-        if printf '%s' "$line" | grep -Eq '^[[:space:]]*(exit|quit|logout|bye)[[:space:]]*$'; then
-          echo "[console] 这里是面板控制台（容器层命令行），exit 不会退出任何东西"
-          continue
-        fi
-        eval "$line"
-      done
-    }
-    console_repl_loop() {
-      while :; do
-        console_repl
-        n=0
-        while [ "$n" -lt 50 ] && read -t 0.1 -r _; do n=$((n+1)); done
-        sleep 5
-      done
-    }
-    console_repl_loop &
-    CONSOLE_PID=$!
-    log "面板控制台已接管为容器层命令行（exit 被拦截；直接敲命令即可）"
-  fi
 fi
 
-# ---------- 启动服务管理器（当前用户运行，状态全在可写卷） ----------
+# ---------- 启动 supervisord（后台） ----------
 SUP_PID=""
 supervisord -c /etc/supervisor/supervisord.conf &
 SUP_PID=$!
 sleep 0.5
 
-# supervisor 看门狗
+# supervisor 看门狗（后台）
 WATCH_PID=""
 sup_watch() {
   while :; do
     if ! kill -0 "$SUP_PID" 2>/dev/null; then
-      warn "supervisord 已退出，正在重启..."
+      warn "supervisord 退出，重启..."
       supervisord -c /etc/supervisor/supervisord.conf &
       SUP_PID=$!
     fi
@@ -194,12 +161,9 @@ sup_watch() {
 sup_watch &
 WATCH_PID=$!
 
-MAIN_PID=""
 shutdown() {
-  warn "收到停止信号，正在关闭"
+  warn "收到停止信号，关闭服务"
   [ -n "$WATCH_PID" ] && kill "$WATCH_PID" 2>/dev/null
-  [ -n "$CONSOLE_PID" ] && kill "$CONSOLE_PID" 2>/dev/null
-  [ -n "$MAIN_PID" ] && kill "$MAIN_PID" 2>/dev/null
   supervisorctl shutdown >/dev/null 2>&1
   [ -n "$SUP_PID" ] && kill "$SUP_PID" 2>/dev/null
   exit 0
@@ -213,28 +177,48 @@ banner() {
   echo "------------------------------------------------------------"
   echo " 容器层工具: ping dig nmap tcpdump socat nc iperf3 mtr git"
   echo "             python3 pip jq rsync ssh cloudflared aria2 ..."
-  echo " 服务管理:   supervisorctl status（SSH/控制台里直接可用）"
-  echo " 加服务:     $SERVICES_DIR/*.conf → 面板重启容器生效"
+  echo " 服务管理:   supervisorctl status"
   echo " SSH:        $SSH_MODE_DESC"
-  echo " 旧proot世界: 命令 sandbox-proot（tunxx 等在 rootfs 里）"
   echo " 保活:       keepalive 运行中（SANDBOX_KEEPALIVE=0 关闭）"
-  echo " 日志:       $LOG_DIR/"
   echo "============================================================"
   echo
+}
+
+# ---------- 前台控制台 REPL（v8 核心：直接读主进程 stdin，绝不放到后台） ----------
+console_repl() {
+  log "控制台就绪（前台 REPL；输入命令执行，Ctrl-D 后 300s 内可重连）"
+  local line
+  while :; do
+    printf '\033[0;36m[sandbox]\033[0m %s $ ' "$(pwd)"
+    if ! IFS= read -r line; then
+      # stdin EOF（面板关闭）：长睡眠，避免空转刷屏；tini 收到 TERM 会被 trap 打断
+      sleep 300
+      continue
+    fi
+    [ -z "$line" ] && continue
+    if printf '%s' "$line" | grep -Eq '^[[:space:]]*(exit|quit|logout)[[:space:]]*$'; then
+      echo "[console] 面板控制台：exit 无效（用面板按钮停止容器）"
+      continue
+    fi
+    # 用子 shell 执行：exit/cd 等内置命令不影响 REPL 自身
+    bash -c "$line" 2>&1
+  done
 }
 
 if [ "$STARTUP_MODE" = "script" ]; then
   banner
   log "执行启动命令: $MODIFIED_STARTUP"
-  bash -c "$MODIFIED_STARTUP" &
-  MAIN_PID=$!
-  wait "$MAIN_PID"
+  bash -c "$MODIFIED_STARTUP"
   RC=$?
-  log "启动命令退出（code=$RC），正在关闭服务..."
+  log "启动命令退出（code=$RC）"
 else
   banner
-  log "守护模式：常驻运行"
-  wait "$WATCH_PID"
+  if [ "${SANDBOX_CONSOLE_SHELL:-1}" = "1" ]; then
+    console_repl            # 前台阻塞；stdin=面板 tty，正常等待输入
+  else
+    log "守护模式：常驻运行（控制台 REPL 关闭）"
+    wait "$WATCH_PID"
+  fi
   RC=0
 fi
 
