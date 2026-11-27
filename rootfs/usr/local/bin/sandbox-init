@@ -88,14 +88,14 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
     SSH_MODE_DESC="主端口 ${ALTARE_PORT}=altare(proot/密码)"
   fi
 
-  # --- 2) dropbear 在第二端口（容器层，公钥） ---
-  # 端口选择：显式 SANDBOX_DROPBEAR_PORT > 自动探测(主端口+1 或常见 25270) > 不启动
-  DB_PORT="${SANDBOX_DROPBEAR_PORT:-}"
-  if [ -z "$DB_PORT" ]; then
-    # 常见面板第二端口就是主端口-1（25412 -> 25270 这种不一定成立），
-    # 这里默认 25270；如需其它端口请在面板加环境变量 SANDBOX_DROPBEAR_PORT
-    DB_PORT="25270"
-  fi
+  # --- 2) openssh 在第二端口（容器层，公钥） ---
+  # v17: 平台只注入主端口 SERVER_PORT，第二端口不暴露、团队变量也不传。
+  # 因此同时监听一组常见候选端口（内置 25270/27810/30719，可用
+  # SANDBOX_DROPBEAR_PORT 覆盖为自定义），覆盖不同容器的分配，避免每台改镜像。
+  DB_PORTS="${SANDBOX_DROPBEAR_PORT:-25270 27810 30719}"
+  # 去掉与主端口相同的项，避免和平台 altare-sshd 抢端口
+  DB_PORTS=$(echo "$DB_PORTS" | tr ' ' '\n' | grep -v "^${ALTARE_PORT}$" | tr '\n' ' ' | xargs)
+  DB_PORT_FIRST=$(echo "$DB_PORTS" | awk '{print $1}')
   # v16: 公钥内置——卷里没有就把镜像里的模板复制过去（新容器开箱即用）
   mkdir -p "$CONTAINER_DIR/.ssh" 2>/dev/null
   if [ ! -s "$CONTAINER_DIR/.ssh/authorized_keys" ] && [ -s /etc/sandbox/authorized_keys ]; then
@@ -103,7 +103,7 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
   fi
   chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
   chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
-  if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ "$DB_PORT" != "$ALTARE_PORT" ] \
+  if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ -n "$DB_PORTS" ] \
      && [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
     # v14: host key 目录必须归当前 uid 所有，否则换节点后 uid 变化
     # （旧机器 988 / 新机器 999）无法在里面生成 key，ssh-keygen 静默失败，
@@ -131,9 +131,12 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
     # 非 root sshd 需要在可写目录放 privilege separation / pid；/run 在只读根下
     # 用镜像层预建的 /run/sshd，pid/日志都在持久卷。
     mkdir -p /run/sshd 2>/dev/null || true
+    # 生成多个 Port 行（sshd 原生支持多端口监听）
+    PORT_LINES=""
+    for p in $DB_PORTS; do PORT_LINES="${PORT_LINES}Port ${p}
+"; done
     cat > "$SSHD_CONF" <<EOF
-Port ${DB_PORT}
-ListenAddress 0.0.0.0
+${PORT_LINES}ListenAddress 0.0.0.0
 HostKey $HK_RSA
 HostKey $HK_ED
 UsePAM no
@@ -159,8 +162,8 @@ startretries=10
 redirect_stderr=true
 stdout_logfile=/home/container/sandbox/logs/sshd.log
 EOF
-    SSH_MODE_DESC="${SSH_MODE_DESC} + 第二端口 ${DB_PORT}=openssh(容器层/公钥)"
-    log "SSH 第二端口 ${DB_PORT}: OpenSSH 容器层直连（公钥: ~/.ssh/authorized_keys）"
+    SSH_MODE_DESC="${SSH_MODE_DESC} + 第二端口 [${DB_PORTS}]=openssh(容器层/公钥)"
+    log "SSH 第二端口 [${DB_PORTS}]: OpenSSH 容器层直连（公钥: ~/.ssh/authorized_keys）"
   else
     rm -f "$SUPD_DIR/zz-dropbear.conf"
     if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ ! -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
