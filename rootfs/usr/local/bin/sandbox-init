@@ -98,15 +98,19 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
   fi
   if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ "$DB_PORT" != "$ALTARE_PORT" ] \
      && [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
-    HK_DIR="$SANDBOX_DIR/hostkeys"; mkdir -p "$HK_DIR"
+    # v14: host key 目录必须归当前 uid 所有，否则换节点后 uid 变化
+    # （旧机器 988 / 新机器 999）无法在里面生成 key，ssh-keygen 静默失败，
+    # sshd 反复 "no hostkeys available" 崩溃。用独立新目录 + 写测试确认可写。
+    HK_DIR="$SANDBOX_DIR/sshd_hostkeys"; mkdir -p "$HK_DIR" 2>/dev/null
+    if ! touch "$HK_DIR/.wtest" 2>/dev/null; then
+      HK_DIR="$SANDBOX_DIR/hk-$(id -u)"; mkdir -p "$HK_DIR" 2>/dev/null
+    fi
+    rm -f "$HK_DIR/.wtest" 2>/dev/null
     HK_ED="$HK_DIR/ssh_host_ed25519_key"
     HK_RSA="$HK_DIR/ssh_host_rsa_key"
-    # v12: 改用 OpenSSH sshd 替代 dropbear。
-    # dropbear 非 root 下有 common-channel.c:705 `!channel->sent_close' 断言 bug，
-    # 客户端 keepalive/重复 channel close 会让它崩溃（表现为连上几分钟后断线）。
-    # OpenSSH 是生产级实现，正确处理协议，稳定不崩。
-    [ -s "$HK_ED" ] || ssh-keygen -q -t ed25519 -N '' -f "$HK_ED" >/dev/null 2>&1
-    [ -s "$HK_RSA" ] || ssh-keygen -q -t rsa -b 2048 -N '' -f "$HK_RSA" >/dev/null 2>&1
+    # v12: OpenSSH sshd 替代 dropbear（后者有 channel-close 断言崩溃 bug）
+    [ -s "$HK_ED" ] || ssh-keygen -q -t ed25519 -N '' -f "$HK_ED"
+    [ -s "$HK_RSA" ] || ssh-keygen -q -t rsa -b 2048 -N '' -f "$HK_RSA"
     chmod 600 "$HK_ED" "$HK_RSA" 2>/dev/null
     chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
     chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
