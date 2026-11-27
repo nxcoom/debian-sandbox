@@ -8,11 +8,15 @@
 #   * 后台子 shell 的 stdin 会被 bash 接到 /dev/null（v4-v7 刷屏根因）
 #   * => 控制台交互必须由前台进程直接 read stdin，绝不放进后台 &
 #
+# v9 修复（在 v8 前台 REPL 基础上）:
+#   - 双 SSH 共存：主端口(SERVER_PORT) altare-sshd(proot/密码) +
+#     第二端口(SANDBOX_DROPBEAR_PORT 默认25270) dropbear(容器层/公钥)
+#   - 控制台 REPL 默认关闭（SANDBOX_CONSOLE_SHELL=1 才开），彻底杜绝刷屏
+#   - 清理旧版 zz-ssh.conf 残留
 # v8 修复:
 #   - 移除后台 console_repl_loop，改为前台 REPL（直接读主进程 stdin）
 #   - read 返回 EOF 时长睡眠（300s），关闭面板再开不会再刷屏
 #   - 命令执行用 bash -c（子 shell），exit 等内置命令不会杀死 REPL
-#   - supervisord/keepalive/ssh 保持在后台由 supervisor 托管
 # ============================================================
 set -u
 
@@ -69,26 +73,40 @@ SSH_PORT="${SERVER_PORT:-22}"
 SSH_MODE_DESC="none"
 
 # ---------- SSH（仅守护模式；由 supervisord 托管） ----------
+# v9: 双端口共存 —— 主端口 SERVER_PORT 给平台 altare-sshd（proot/密码），
+#     第二端口 SANDBOX_DROPBEAR_PORT（默认 25270）给 dropbear（容器层/公钥）。
+#     两者互不冲突；公钥登录容器层不再牺牲面板密码登录。
 if [ "$STARTUP_MODE" = "daemon" ]; then
-  SSH_MODE="${SANDBOX_SSH:-auto}"
-  if [ "$SSH_MODE" = "auto" ]; then
-    if [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then SSH_MODE="dropbear"
-    elif [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then SSH_MODE="altare"
-    else SSH_MODE="none"; fi
+  # 清理旧版本残留配置（v3-v8 的 zz-ssh.conf 会抢占端口）
+  rm -f "$SUPD_DIR/zz-ssh.conf" "$SUPD_DIR/zz-sandbox-sshd.conf"
+
+  # --- 1) 平台 altare-sshd 永远留在主端口（除非 SANDBOX_ALTARE_SSHD=0） ---
+  ALTARE_PORT="${SERVER_PORT:-22}"
+  if [ "${SANDBOX_ALTARE_SSHD:-1}" = "1" ] && [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then
+    ( cd "$CONTAINER_DIR" && nohup ./.sandbox/altare-sshd >/dev/null 2>&1 & )
+    log "SSH 主端口 ${ALTARE_PORT}: 平台 altare-sshd（proot 环境，凭据同面板）"
+    SSH_MODE_DESC="主端口 ${ALTARE_PORT}=altare(proot/密码)"
   fi
 
-  rm -f "$SUPD_DIR/zz-ssh.conf"
-  case "$SSH_MODE" in
-    dropbear)
-      HK_DIR="$SANDBOX_DIR/hostkeys"; mkdir -p "$HK_DIR"
-      HK="$HK_DIR/dropbear_ed25519_host_key"
-      DBKEY="$(command -v dropbearkey || echo /usr/sbin/dropbearkey)"
-      [ -f "$HK" ] || "$DBKEY" -t ed25519 -f "$HK" >/dev/null 2>&1
-      chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
-      chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
-      cat > "$SUPD_DIR/zz-ssh.conf" <<EOF
-[program:sshd]
-command=/usr/sbin/dropbear -F -E -s -p 0.0.0.0:${SSH_PORT} -r $HK
+  # --- 2) dropbear 在第二端口（容器层，公钥） ---
+  # 端口选择：显式 SANDBOX_DROPBEAR_PORT > 自动探测(主端口+1 或常见 25270) > 不启动
+  DB_PORT="${SANDBOX_DROPBEAR_PORT:-}"
+  if [ -z "$DB_PORT" ]; then
+    # 常见面板第二端口就是主端口-1（25412 -> 25270 这种不一定成立），
+    # 这里默认 25270；如需其它端口请在面板加环境变量 SANDBOX_DROPBEAR_PORT
+    DB_PORT="25270"
+  fi
+  if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ "$DB_PORT" != "$ALTARE_PORT" ] \
+     && [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
+    HK_DIR="$SANDBOX_DIR/hostkeys"; mkdir -p "$HK_DIR"
+    HK="$HK_DIR/dropbear_ed25519_host_key"
+    DBKEY="$(command -v dropbearkey || echo /usr/sbin/dropbearkey)"
+    [ -f "$HK" ] || "$DBKEY" -t ed25519 -f "$HK" >/dev/null 2>&1
+    chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
+    chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
+    cat > "$SUPD_DIR/zz-dropbear.conf" <<EOF
+[program:dropbear]
+command=/usr/sbin/dropbear -F -E -s -p 0.0.0.0:${DB_PORT} -r $HK
 directory=/home/container
 autostart=true
 autorestart=true
@@ -96,23 +114,14 @@ startretries=10
 redirect_stderr=true
 stdout_logfile=/home/container/sandbox/logs/dropbear.log
 EOF
-      SSH_MODE_DESC="dropbear(容器层,公钥): ssh container@<host> -p $SSH_PORT"
-      log "SSH=dropbear 容器层直连"
-      warn "dropbear 启用 → 面板密码登录失效；登录: ssh container@<host> -p $SSH_PORT"
-      ;;
-    altare)
-      if [ -x "$CONTAINER_DIR/.sandbox/altare-sshd" ]; then
-        log "SSH=平台 altare-sshd（proot 环境，凭据同面板）"
-        ( cd "$CONTAINER_DIR" && nohup ./.sandbox/altare-sshd >/dev/null 2>&1 & )
-        SSH_MODE_DESC="altare-sshd(proot,面板凭据)"
-      else
-        warn "未找到 .sandbox/altare-sshd"
-      fi
-      ;;
-    none)
-      log "SSH 已禁用（SANDBOX_SSH=none）"
-      ;;
-  esac
+    SSH_MODE_DESC="${SSH_MODE_DESC} + 第二端口 ${DB_PORT}=dropbear(容器层/公钥)"
+    log "SSH 第二端口 ${DB_PORT}: dropbear 容器层直连（公钥: ~/.ssh/authorized_keys）"
+  else
+    rm -f "$SUPD_DIR/zz-dropbear.conf"
+    if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ ! -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
+      log "dropbear 未启用：~/.ssh/authorized_keys 为空（放公钥后重启即可启用第二端口）"
+    fi
+  fi
 
   # ---- 内置保活 ----
   KEEPALIVE_CONF="$SUPD_DIR/zz-keepalive.conf"
@@ -213,10 +222,12 @@ if [ "$STARTUP_MODE" = "script" ]; then
   log "启动命令退出（code=$RC）"
 else
   banner
-  if [ "${SANDBOX_CONSOLE_SHELL:-1}" = "1" ]; then
+  # v9: 默认关闭控制台 REPL（历史刷屏根源）；有 API + 双 SSH 后不再需要它。
+  # 需要时可在面板设 SANDBOX_CONSOLE_SHELL=1 显式开启（前台 read，已不会刷屏）。
+  if [ "${SANDBOX_CONSOLE_SHELL:-0}" = "1" ]; then
     console_repl            # 前台阻塞；stdin=面板 tty，正常等待输入
   else
-    log "守护模式：常驻运行（控制台 REPL 关闭）"
+    log "守护模式：常驻运行（控制台 REPL 默认关闭；用 SSH/API 操作容器层）"
     wait "$WATCH_PID"
   fi
   RC=0
