@@ -96,6 +96,13 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
     # 这里默认 25270；如需其它端口请在面板加环境变量 SANDBOX_DROPBEAR_PORT
     DB_PORT="25270"
   fi
+  # v16: 公钥内置——卷里没有就把镜像里的模板复制过去（新容器开箱即用）
+  mkdir -p "$CONTAINER_DIR/.ssh" 2>/dev/null
+  if [ ! -s "$CONTAINER_DIR/.ssh/authorized_keys" ] && [ -s /etc/sandbox/authorized_keys ]; then
+    cp /etc/sandbox/authorized_keys "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
+  fi
+  chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
+  chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
   if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ "$DB_PORT" != "$ALTARE_PORT" ] \
      && [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
     # v14: host key 目录必须归当前 uid 所有，否则换节点后 uid 变化
@@ -108,12 +115,18 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
     rm -f "$HK_DIR/.wtest" 2>/dev/null
     HK_ED="$HK_DIR/ssh_host_ed25519_key"
     HK_RSA="$HK_DIR/ssh_host_rsa_key"
-    # v12: OpenSSH sshd 替代 dropbear（后者有 channel-close 断言崩溃 bug）
-    [ -s "$HK_ED" ] || ssh-keygen -q -t ed25519 -N '' -f "$HK_ED"
-    [ -s "$HK_RSA" ] || ssh-keygen -q -t rsa -b 2048 -N '' -f "$HK_RSA"
+    # v16: host key 从镜像内置模板复制（不依赖 ssh-keygen 的 uid 写权限，
+    # 换节点 uid 变化也不怕）。模板在 /etc/sandbox/hostkeys/，构建时烧入。
+    if [ ! -s "$HK_ED" ] && [ -s /etc/sandbox/hostkeys/ssh_host_ed25519_key ]; then
+      cp /etc/sandbox/hostkeys/ssh_host_ed25519_key "$HK_ED" 2>/dev/null
+    fi
+    if [ ! -s "$HK_RSA" ] && [ -s /etc/sandbox/hostkeys/ssh_host_rsa_key ]; then
+      cp /etc/sandbox/hostkeys/ssh_host_rsa_key "$HK_RSA" 2>/dev/null
+    fi
+    # 兜底：模板也没有就现场生成
+    [ -s "$HK_ED" ] || ssh-keygen -q -t ed25519 -N '' -f "$HK_ED" </dev/null 2>/dev/null || true
+    [ -s "$HK_RSA" ] || ssh-keygen -q -t rsa -b 2048 -N '' -f "$HK_RSA" </dev/null 2>/dev/null || true
     chmod 600 "$HK_ED" "$HK_RSA" 2>/dev/null
-    chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
-    chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
     SSHD_CONF="$SANDBOX_DIR/sshd_config"
     # 非 root sshd 需要在可写目录放 privilege separation / pid；/run 在只读根下
     # 用镜像层预建的 /run/sshd，pid/日志都在持久卷。

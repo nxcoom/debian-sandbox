@@ -67,6 +67,10 @@ RUN set -eux; \
     echo 'container:x:988:' >> /etc/group; \
     echo 'container:x:988:988::/home/container:/bin/bash' >> /etc/passwd; \
     chmod 0755 /usr/local/bin/sandbox-init /usr/local/bin/sandbox-proot /usr/local/bin/sandbox-keepalive; \
+    chmod 0644 /etc/sandbox/hostkeys/ssh_host_rsa_key /etc/sandbox/hostkeys/ssh_host_ed25519_key /etc/sandbox/authorized_keys; \
+    # v16: 用无-capability 的 Python ping wrapper 覆盖 /usr/bin/ping
+    # （平台 CapEff=0，原 ping 用 raw socket 报 Operation not permitted）
+    cp /usr/local/bin/ping /usr/bin/ping && chmod 0755 /usr/bin/ping; \
     mkdir -p /home/container /run/sshd /var/log/supervisor /etc/supervisor/conf.d; \
     chown 988:988 /home/container
 

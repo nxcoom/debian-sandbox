@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+# ============================================================
+# ping — 无 capability 版本的 ping 替代品
+#
+# 平台丢弃 CAP_NET_RAW（CapEff=0），Debian 的 /usr/bin/ping 用 raw socket
+# 会报 "Operation not permitted"。Linux 的 ping_group_range=0 2147483647
+# 允许非特权用户用 SOCK_DGRAM + IPPROTO_ICMP（ping socket），本脚本用它实现
+# 基础 ping 功能，无需任何 capability。
+#
+# 支持常用参数：-c 次数  -W 超时秒  -i 间隔秒  -q 静默  host
+# ============================================================
+import os, sys, socket, struct, time, select
+
+def checksum(data):
+    if len(data) % 2:
+        data += b'\x00'
+    s = sum((data[i] << 8) + data[i+1] for i in range(0, len(data), 2))
+    while s >> 16:
+        s = (s & 0xffff) + (s >> 16)
+    return ~s & 0xffff
+
+def resolve(host):
+    try:
+        return socket.gethostbyname(host)
+    except Exception:
+        return None
+
+def ping_one(sock, dest, seq, ident, timeout, quiet):
+    payload = b'ping-wrapper-' + struct.pack('!H', seq)
+    pkt = struct.pack('!BBHHH', 8, 0, 0, ident, seq) + payload
+    ck = checksum(pkt)
+    pkt = struct.pack('!BBHHH', 8, 0, ck, ident, seq) + payload
+    t0 = time.time()
+    try:
+        sock.sendto(pkt, (dest, 0))
+    except Exception as e:
+        print(f"ping: sendto: {e}", file=sys.stderr)
+        return None
+    deadline = t0 + timeout
+    while True:
+        remain = deadline - time.time()
+        if remain <= 0:
+            return None
+        r, _, _ = select.select([sock], [], [], remain)
+        if not r:
+            return None
+        try:
+            data, addr = sock.recvfrom(1024)
+        except Exception:
+            continue
+        if len(data) < 28:
+            continue
+        icmp_type, _, _, r_id, r_seq = struct.unpack('!BBHHH', data[:8])
+        if icmp_type != 0 or r_id != ident or r_seq != seq:
+            continue
+        return (time.time() - t0) * 1000, addr[0]
+
+def main():
+    args = sys.argv[1:]
+    count = -1
+    timeout = 1.0
+    interval = 1.0
+    quiet = False
+    host = None
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ('-c', '-W', '-i') and i + 1 < len(args):
+            v = args[i+1]
+            try:
+                if a == '-c': count = int(v)
+                elif a == '-W': timeout = float(v)
+                elif a == '-i': interval = float(v)
+            except ValueError:
+                pass
+            i += 2
+            continue
+        elif a == '-q':
+            quiet = True
+        elif not a.startswith('-'):
+            host = a
+        i += 1
+
+    if not host:
+        print("usage: ping [-c count] [-W timeout] [-i interval] [-q] host", file=sys.stderr)
+        return 2
+
+    dest = resolve(host)
+    if not dest:
+        print(f"ping: {host}: Name or service not known", file=sys.stderr)
+        return 1
+
+    ident = 0x5000 | (os.getpid() & 0x0fff)
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP)
+        sock.settimeout(timeout)
+    except Exception as e:
+        print(f"ping: socket: {e} (平台可能禁用 ping_group_range)", file=sys.stderr)
+        return 1
+
+    if not quiet:
+        print(f"PING {host} ({dest}) using ICMP datagram socket")
+    sent = 0
+    recv = 0
+    times = []
+    seq = 0
+    try:
+        while count < 0 or sent < count:
+            sent += 1
+            res = ping_one(sock, dest, seq, ident, timeout, quiet)
+            if res:
+                rtt, src = res
+                recv += 1
+                times.append(rtt)
+                if not quiet:
+                    print(f"64 bytes from {src}: icmp_seq={seq} ttl=64 time={rtt:.1f} ms")
+            elif not quiet:
+                pass
+            seq += 1
+            if count < 0 or sent < count:
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sock.close()
+
+    if not quiet:
+        print(f"--- {dest} ping statistics ---")
+        loss = ((sent - recv) / sent * 100) if sent else 0
+        print(f"{sent} packets transmitted, {recv} received, {loss:.0f}% packet loss")
+        if times:
+            print(f"rtt min/avg/max = {min(times):.1f}/{sum(times)/len(times):.1f}/{max(times):.1f} ms")
+    return 0 if recv else 1
+
+if __name__ == '__main__':
+    sys.exit(main())
