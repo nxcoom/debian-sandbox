@@ -99,20 +99,36 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
   if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ "$DB_PORT" != "$ALTARE_PORT" ] \
      && [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
     HK_DIR="$SANDBOX_DIR/hostkeys"; mkdir -p "$HK_DIR"
-    HK_ED="$HK_DIR/dropbear_ed25519_host_key"
-    HK_RSA="$HK_DIR/dropbear_rsa_host_key"
-    DBKEY="$(command -v dropbearkey || echo /usr/sbin/dropbearkey)"
-    # v10: 必须同时提供 RSA + ed25519 host key。只给 ed25519 时，
-    # 优先试 rsa-sha2 的客户端会触发 dropbear rsa.c `key != NULL' 断言崩溃
-    # （日志 Exit before auth...Failed assertion），表现为 handshake failed: EOF。
-    [ -f "$HK_ED" ] || "$DBKEY" -t ed25519 -f "$HK_ED" >/dev/null 2>&1
-    [ -s "$HK_RSA" ] || "$DBKEY" -t rsa -s 2048 -f "$HK_RSA" >/dev/null 2>&1
+    HK_ED="$HK_DIR/ssh_host_ed25519_key"
+    HK_RSA="$HK_DIR/ssh_host_rsa_key"
+    # v12: 改用 OpenSSH sshd 替代 dropbear。
+    # dropbear 非 root 下有 common-channel.c:705 `!channel->sent_close' 断言 bug，
+    # 客户端 keepalive/重复 channel close 会让它崩溃（表现为连上几分钟后断线）。
+    # OpenSSH 是生产级实现，正确处理协议，稳定不崩。
+    [ -s "$HK_ED" ] || ssh-keygen -q -t ed25519 -N '' -f "$HK_ED" >/dev/null 2>&1
+    [ -s "$HK_RSA" ] || ssh-keygen -q -t rsa -b 2048 -N '' -f "$HK_RSA" >/dev/null 2>&1
     chmod 600 "$HK_ED" "$HK_RSA" 2>/dev/null
     chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
     chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
+    SSHD_CONF="$SANDBOX_DIR/sshd_config"
+    cat > "$SSHD_CONF" <<EOF
+Port ${DB_PORT}
+ListenAddress 0.0.0.0
+HostKey $HK_RSA
+HostKey $HK_ED
+UsePAM no
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile ${CONTAINER_DIR}/.ssh/authorized_keys
+PermitRootLogin no
+AllowUsers container
+StrictModes no
+PrintMotd no
+PidFile ${SANDBOX_DIR}/sshd.pid
+EOF
     cat > "$SUPD_DIR/zz-dropbear.conf" <<EOF
 [program:dropbear]
-command=/bin/sh -c 'export LD_PRELOAD=/etc/sandbox/fakepw.so; exec /usr/sbin/dropbear -F -E -s -p 0.0.0.0:${DB_PORT} -r $HK_RSA -r $HK_ED'
+command=/bin/sh -c 'export LD_PRELOAD=/etc/sandbox/fakepw.so; exec /usr/sbin/sshd -D -e -f ${SSHD_CONF}'
 directory=/home/container
 autostart=true
 autorestart=true
@@ -120,8 +136,8 @@ startretries=10
 redirect_stderr=true
 stdout_logfile=/home/container/sandbox/logs/dropbear.log
 EOF
-    SSH_MODE_DESC="${SSH_MODE_DESC} + 第二端口 ${DB_PORT}=dropbear(容器层/公钥)"
-    log "SSH 第二端口 ${DB_PORT}: dropbear 容器层直连（公钥: ~/.ssh/authorized_keys）"
+    SSH_MODE_DESC="${SSH_MODE_DESC} + 第二端口 ${DB_PORT}=openssh(容器层/公钥)"
+    log "SSH 第二端口 ${DB_PORT}: OpenSSH 容器层直连（公钥: ~/.ssh/authorized_keys）"
   else
     rm -f "$SUPD_DIR/zz-dropbear.conf"
     if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ ! -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
