@@ -99,14 +99,20 @@ if [ "$STARTUP_MODE" = "daemon" ]; then
   if [ "${SANDBOX_DROPBEAR:-1}" = "1" ] && [ "$DB_PORT" != "$ALTARE_PORT" ] \
      && [ -s "$CONTAINER_DIR/.ssh/authorized_keys" ]; then
     HK_DIR="$SANDBOX_DIR/hostkeys"; mkdir -p "$HK_DIR"
-    HK="$HK_DIR/dropbear_ed25519_host_key"
+    HK_ED="$HK_DIR/dropbear_ed25519_host_key"
+    HK_RSA="$HK_DIR/dropbear_rsa_host_key"
     DBKEY="$(command -v dropbearkey || echo /usr/sbin/dropbearkey)"
-    [ -f "$HK" ] || "$DBKEY" -t ed25519 -f "$HK" >/dev/null 2>&1
+    # v10: 必须同时提供 RSA + ed25519 host key。只给 ed25519 时，
+    # 优先试 rsa-sha2 的客户端会触发 dropbear rsa.c `key != NULL' 断言崩溃
+    # （日志 Exit before auth...Failed assertion），表现为 handshake failed: EOF。
+    [ -f "$HK_ED" ] || "$DBKEY" -t ed25519 -f "$HK_ED" >/dev/null 2>&1
+    [ -s "$HK_RSA" ] || "$DBKEY" -t rsa -s 2048 -f "$HK_RSA" >/dev/null 2>&1
+    chmod 600 "$HK_ED" "$HK_RSA" 2>/dev/null
     chmod 700 "$CONTAINER_DIR/.ssh" 2>/dev/null
     chmod 600 "$CONTAINER_DIR/.ssh/authorized_keys" 2>/dev/null
     cat > "$SUPD_DIR/zz-dropbear.conf" <<EOF
 [program:dropbear]
-command=/usr/sbin/dropbear -F -E -s -p 0.0.0.0:${DB_PORT} -r $HK
+command=/usr/sbin/dropbear -F -E -s -p 0.0.0.0:${DB_PORT} -r $HK_RSA -r $HK_ED
 directory=/home/container
 autostart=true
 autorestart=true
